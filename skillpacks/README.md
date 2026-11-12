@@ -1,0 +1,1 @@
+Place local Agent Skills-compatible folders here when developing the workbench. Each folder should contain a `SKILL.md`. Imported packs are indexed by the Skill Library page; external scripts are never executed.
