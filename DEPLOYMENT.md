@@ -66,3 +66,14 @@ Only configure this if your organization's code/data policy allows the selected 
 ## Known limitations
 
 This is a migration workbench prototype, not a universal compiler. Native RPA export formats and production-ready migrations still require platform-specific parsers, activity/connector metadata, credentials and environment bindings, native validation, and regression testing. Do not treat generated scaffolds as production-ready bots.
+
+
+## Updating an existing Streamlit deployment
+
+1. Download and extract the latest deployment ZIP.
+2. In the connected GitHub repository, replace the existing root files with the updated root files from the ZIP (do not upload the ZIP itself).
+3. Ensure `app.py`, `engine.py`, `uipath_generator.py`, `skill_loader.py`, `requirements.txt`, `.streamlit/config.toml` and the complete `skillpacks/` folder are committed at the repository root.
+4. Commit to the branch configured in Streamlit (normally `main`). Streamlit Community Cloud should detect the commit and rebuild the app.
+5. Open Manage app → Logs if the rebuild fails. Share the redacted traceback, not secrets or source workbooks.
+
+No API key is required for source parsing, the bundled skill library, the SYNC-specific offline UiPath generation, or the static project validator. API/model configuration is optional.

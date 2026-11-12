@@ -1,5 +1,5 @@
 from __future__ import annotations
-import io, json, os, zipfile, textwrap
+import io, json, os, re, zipfile, textwrap
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -7,8 +7,9 @@ import pandas as pd
 from engine import (
     TARGETS, extract_upload, analyze_source, build_intermediate_representation,
     build_migration_prompt, call_openai_compatible, generate_fallback, build_report_md,
+    normalize_migration_result,
 )
-from skill_loader import DEFAULT_SOURCES, import_skill_zip, import_github_skill_repo, parse_skill_markdown, select_relevant_skills
+from skill_loader import (DEFAULT_SOURCES, import_skill_zip, import_github_skill_repo, parse_skill_markdown, select_relevant_skills, load_bundled_skills, merge_skills)
 
 st.set_page_config(page_title="Universal Automation Migration Workbench", page_icon="🔁", layout="wide")
 
@@ -28,12 +29,12 @@ div[data-testid="stMetric"] {background:#fff; border:1px solid #e7edf4; padding:
 </style>
 """, unsafe_allow_html=True)
 
-if "skills" not in st.session_state: st.session_state.skills=[]
+if "skills" not in st.session_state: st.session_state.skills=load_bundled_skills()
 if "extracted" not in st.session_state: st.session_state.extracted=None
 if "analysis" not in st.session_state: st.session_state.analysis=None
 if "ir" not in st.session_state: st.session_state.ir=None
 if "migration" not in st.session_state: st.session_state.migration=None
-if "artifacts" not in st.session_state: st.session_state.artifacts={}
+if not isinstance(st.session_state.get("artifacts"), dict): st.session_state.artifacts={}
 if "page" not in st.session_state: st.session_state.page="Migrate"
 
 with st.sidebar:
@@ -44,7 +45,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**Engine status**")
     st.markdown("<span style='color:#16835e'>●</span> Static analyzer available", unsafe_allow_html=True)
-    st.markdown(f"<span style='color:#16835e'>●</span> {len(st.session_state.skills)} imported skill/reference files", unsafe_allow_html=True)
+    st.markdown(f"<span style='color:#16835e'>●</span> {len(st.session_state.skills)} bundled/imported skill Markdown files", unsafe_allow_html=True)
     st.caption("AI generation is optional. Static analysis runs locally in this app process.")
 
 st.markdown('<div class="hero"><div class="eyebrow">Code intelligence · RPA modernization · platform migration</div><h1>Universal Automation Migration Workbench</h1><p>Reverse-engineer code and RPA workflows, extract their business rules, map them to a universal workflow model, and generate a target-platform migration package.</p></div>', unsafe_allow_html=True)
@@ -54,26 +55,28 @@ if page == "Migrate":
     left, right = st.columns([1.04, .96], gap="large")
     with left:
         st.subheader("1. Source project")
-        uploads=st.file_uploader("Upload source files or a project archive", type=["xlsm","xlam","bas","cls","frm","vba","txt","py","pyw","vb","vbs","cs","xaml","json","xml","flow","atmx","bprelease","uipx","nupkg","zip","md"], accept_multiple_files=True, help="Supports VBA exports and macro-enabled Excel workbooks, Python, VB.NET, C#, UiPath XAML, JSON flow definitions, XML exports and skill archives.")
+        uploads=st.file_uploader("Upload source files or a project archive", type=["xlsm","xlam","bas","cls","frm","vba","txt","py","pyw","vb","vbs","cs","xaml","json","xml","flow","atmx","bprelease","uipx","nupkg","zip","md","mdx"], accept_multiple_files=True, help="Supports VBA exports and macro-enabled Excel workbooks, Python, VB.NET, C#, UiPath XAML, JSON flow definitions, XML exports and skill archives.")
         manual = st.text_area("Or paste source code / process description", height=170, placeholder="Paste code, exported workflow XML/JSON, or describe the automation when there is no source file.")
         source_hint=st.selectbox("Source technology (optional hint)", ["Auto-detect","VBA / Excel Macro","Python","VB.NET / VBScript","C# / .NET","UiPath XAML","Power Automate cloud flow","Power Automate Desktop","Automation Anywhere","Blue Prism","Mixed / other"])
         user_context=st.text_area("Business context and migration requirements (recommended)", height=100, placeholder="What starts the process? What are the inputs/outputs? Any rules that must not change? Target platform/version? Environment restrictions?")
     with right:
         st.subheader("2. Target platform")
         target=st.selectbox("Migrate into", TARGETS, index=0)
-        migration_mode=st.radio("Migration depth", ["Understand + explain", "Generate target scaffold", "Generate full AI-assisted migration draft"], index=2, help="Full AI-assisted generation requires explicit opt-in and a configured OpenAI-compatible API. A static scaffold is available without AI.")
-        st.markdown("#### AI-assisted analysis (optional)")
-        env_key=os.getenv("OPENAI_API_KEY", "")
-        api_key=st.text_input("Model API key", value=env_key, type="password", help="Can also be supplied through OPENAI_API_KEY. Kept in this Streamlit session only; not written into project files.")
-        model=st.text_input("Model name", value=os.getenv("MIGRATION_MODEL", "gpt-4.1"))
-        base_url=st.text_input("OpenAI-compatible API base URL", value=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-        send_to_ai=st.checkbox("I explicitly approve sending the uploaded source and selected skill references to this model provider", value=False)
-        st.caption("Without this checkbox, source parsing and fallback scaffolding remain local. Check your organization's policy before transmitting confidential code or workbook data.")
-        chosen_skill_limit=st.slider("Relevant imported skill references", 1, 10, 5)
+        migration_mode=st.radio("Migration mode", ["Generate offline migration (no API key)", "Understand + explain", "Optional AI semantic enhancement"], index=0, help="Offline migration uses bundled skill rules and deterministic source parsers. AI is optional and never required to generate the SYNC UiPath project.")
+        with st.expander("Optional AI enhancement (not required)", expanded=False):
+            env_key=os.getenv("OPENAI_API_KEY", "")
+            api_key=st.text_input("Model API key", value=env_key, type="password", help="Optional. Never needed for offline analysis or the deterministic SYNC-to-UiPath migration.")
+            model=st.text_input("Model name", value=os.getenv("MIGRATION_MODEL", "gpt-4.1"))
+            base_url=st.text_input("OpenAI-compatible API base URL", value=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+            send_to_ai=st.checkbox("I explicitly approve sending source code and selected skills to the model provider", value=False)
+        if "api_key" not in locals(): api_key=env_key if "env_key" in locals() else os.getenv("OPENAI_API_KEY", "")
+        if "send_to_ai" not in locals(): send_to_ai=False
+        st.caption("Offline analysis and SYNC UiPath project generation run without any model API key.")
+        chosen_skill_limit=st.slider("Relevant imported skill references included in this migration", 1, 30, 12)
         if st.session_state.skills:
-            st.caption(f"Skill library has {len(st.session_state.skills)} imported SKILL.md / reference documents.")
+            st.caption(f"Skill library contains {len(st.session_state.skills)} bundled/imported Markdown references, available without an API key.")
         else:
-            st.caption("No external skill packs imported yet. Add them from Skill Library.")
+            st.caption("Bundled platform playbooks are loaded. Import the full upstream Markdown repositories from Skill Library for broader coverage.")
 
     c1,c2=st.columns([1,4])
     with c1:
@@ -143,58 +146,132 @@ if page == "Migrate":
 
         st.divider(); st.subheader("3. Generate migration package")
         if st.button("Generate migration", type="primary", use_container_width=True):
-            relevant=select_relevant_skills(st.session_state.skills, f"{target} {user_context} {analysis.get('source_filename','')} {' '.join(x.get('name', '') for x in analysis.get('symbols', [])[:80])} {' '.join(analysis.get('external_touchpoints', []))}", limit=chosen_skill_limit)
+            skill_query = f"{target} {user_context} {analysis.get('source_filename','')} {' '.join(x.get('name', '') for x in analysis.get('symbols', [])[:100])} {' '.join(analysis.get('external_touchpoints', []))}"
+            relevant=select_relevant_skills(st.session_state.skills, skill_query, limit=chosen_skill_limit)
+            if not relevant:
+                relevant=st.session_state.skills[:chosen_skill_limit]
             try:
-                if migration_mode=="Generate full AI-assisted migration draft" and send_to_ai and api_key.strip():
-                    prompt=build_migration_prompt(analysis, ir, target, relevant, user_context)
-                    with st.spinner("Generating target migration draft…"):
-                        result=call_openai_compatible(prompt, st.session_state.extracted["files"], api_key.strip(), model.strip(), base_url.strip())
-                    result["generation_mode"]="AI-assisted; provider call explicitly approved"
-                elif migration_mode=="Understand + explain":
+                if migration_mode == "Understand + explain":
                     result=generate_fallback("Platform-neutral specification", ir, analysis)
-                    result["generation_mode"]="Static analysis only"
+                    result=normalize_migration_result(result, "Platform-neutral specification", analysis)
+                    result["generation_mode"]="Offline source understanding; no API key"
                 else:
-                    result=generate_fallback(target, ir, analysis)
-                    result["generation_mode"]="Static scaffold; no AI provider call"
-                    if migration_mode=="Generate full AI-assisted migration draft":
-                        st.warning("AI generation was not performed. Enter an API key and explicitly approve source sharing to enable semantic model-assisted conversion. A static scaffold was generated instead.")
+                    # Always create the deterministic target package first. For the
+                    # SYNC workbook this executes a source-specific translator that
+                    # emits the modular UiPath XAML project without an LLM.
+                    result=generate_fallback(target, ir, analysis, relevant_skills=relevant)
+                    result=normalize_migration_result(result, target, analysis)
+                    result["generation_mode"]="Offline deterministic generation; no API key"
+                    if migration_mode == "Optional AI semantic enhancement" and send_to_ai and api_key.strip():
+                        try:
+                            prompt=build_migration_prompt(analysis, ir, target, relevant, user_context)
+                            with st.spinner("Adding an optional semantic review; deterministic target files are preserved…"):
+                                ai_result=call_openai_compatible(prompt, st.session_state.extracted["files"], api_key.strip(), model.strip(), base_url.strip())
+                            ai_result=normalize_migration_result(ai_result, target, analysis)
+                            review=["# Optional AI semantic review", "", str(ai_result.get("executive_summary", "")), "", "## Additional unresolved items"]
+                            review.extend("- " + str(x) for x in ai_result.get("unresolved_items", []))
+                            review.extend(["", "## Additional test recommendations"])
+                            review.extend("- " + str(x) for x in ai_result.get("test_plan", []))
+                            result.setdefault("generated_files", []).append({"path":"Migration/AI_Semantic_Review.md", "content":"\n".join(review), "purpose":"Optional model-generated review; it does not replace deterministic XAML."})
+                            result["generation_mode"]="Offline deterministic project + optional AI review"
+                        except Exception as ai_exc:
+                            st.warning(f"Optional AI review was unavailable; the offline migration project is complete: {ai_exc}")
+                    elif migration_mode == "Optional AI semantic enhancement" and not (send_to_ai and api_key.strip()):
+                        st.info("No API key or consent supplied. Generated the complete offline migration instead.")
+                result=normalize_migration_result(result, target, analysis)
+                # Normalize all generator output before any metadata or rendering use.
+                skill_md = ["# Skill references used by this migration", "", "These bundled/imported Markdown files informed the deterministic migration design. They are reference guidance, not executable code.", ""]
+                for skill in relevant:
+                    skill_md.extend([f"## {skill.get('name','Skill')}", f"Source: {skill.get('source','unknown')}", "", str(skill.get('description','')), ""])
+                result.setdefault("generated_files", []).append({"path":"Skill_References/Applied_Skills.md", "content":"\n".join(skill_md), "purpose":"Traceability for the skill guidance selected during this migration."})
+                # Preserve every bundled/imported Markdown skill inside the exported
+                # migration package. The relevant subset is separately embedded in
+                # Skills/Applied_Skill_References.md by the target generator.
+                skill_index=["# Complete Skill Library Snapshot", "", f"Skill Markdown files included: {len(st.session_state.skills)}", "", "All imported Markdown is stored as reference data; scripts are not executed.", ""]
+                for i, skill in enumerate(st.session_state.skills):
+                    base=re.sub(r"[^A-Za-z0-9_.-]+", "_", str(skill.get("name") or f"skill_{i}"))[:80] or f"skill_{i}"
+                    digest=re.sub(r"[^A-Za-z0-9_.-]+", "_", str(skill.get("source") or "bundled"))[-55:] or "local"
+                    rel=f"Skills/Library/{i+1:03d}_{base}_{digest}.md"
+                    result["generated_files"].append({"path":rel, "content":str(skill.get("content") or ""), "purpose":"Offline Markdown skill/reference included in the project library."})
+                    skill_index.append(f"- `{rel}` — {skill.get('description','')}")
+                result["generated_files"].append({"path":"Skills/Library/INDEX.md", "content":"\n".join(skill_index), "purpose":"Index of every Markdown skill packaged with the migration."})
                 report=build_report_md(result, analysis, target)
                 artifacts={"migration-report.md":report,"source-analysis.json":json.dumps(analysis,indent=2,ensure_ascii=False),"workflow-ir.json":json.dumps(ir,indent=2,ensure_ascii=False)}
                 for f in result.get("generated_files",[]):
                     path=Path(f.get("path","generated.txt"))
                     if path.is_absolute() or ".." in path.parts: continue
-                    artifacts[str(path)]=str(f.get("content",""))
+                    artifacts[path.as_posix()]=str(f.get("content",""))
                 st.session_state.migration=result; st.session_state.artifacts=artifacts; st.session_state.target=target
-                st.success("Migration draft generated. Review every TODO, unresolved item and platform-specific dependency before use.")
+                if target == "UiPath (XAML)" and str((result.get("target_design") or {}).get("status") or "").startswith("modular business-logic"):
+                    st.success(f"Offline UiPath project generated: {len([x for x in result['generated_files'] if x['path'].lower().endswith('.xaml')])} XAML workflows; {len(result['mapping_table'])} source procedures mapped. No API key used.")
+                else:
+                    st.success("Offline migration package generated. Review the mapping and target-specific requirements before use.")
             except Exception as exc:
-                st.error(f"Migration generation failed: {exc}")
+                st.error(f"Migration generation failed: {type(exc).__name__}: {exc}")
         if st.session_state.migration:
-            result=st.session_state.migration
+            result=normalize_migration_result(st.session_state.get("migration"), st.session_state.get("target", target), analysis)
+            st.session_state.migration=result
+            artifact_state=st.session_state.get("artifacts")
+            if not isinstance(artifact_state, dict):
+                artifact_state={}
+                st.session_state.artifacts=artifact_state
             st.markdown(f"### {result.get('executive_summary','Migration output')}")
             st.caption(f"Generation mode: {result.get('generation_mode','unknown')} · Confidence: {result.get('confidence','not rated')}")
             mtabs=st.tabs(["Mapping","Unresolved items","Test plan","Risks & assumptions","Generated files"])
-            with mtabs[0]: st.dataframe(pd.DataFrame(result.get("mapping_table",[])), use_container_width=True, hide_index=True) if result.get("mapping_table") else st.info("No mapping table was produced.")
+            with mtabs[0]:
+                # Keep the rendering boundary defensive: legacy session data, a failed
+                # generator, or a provider response must never break the whole page.
+                mapping_rows=result.get("mapping_table") if isinstance(result, dict) and isinstance(result.get("mapping_table"), list) else []
+                mapping_rows=[row for row in mapping_rows if isinstance(row, dict)]
+                if mapping_rows: st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+                else: st.info("No mapping table was produced by this analyzer. See the procedure inventory and unresolved items.")
             with mtabs[1]: st.write(result.get("unresolved_items",[]))
             with mtabs[2]: st.write(result.get("test_plan",[]))
             with mtabs[3]:
                 st.markdown("**Risks**"); st.write(result.get("risks",[])); st.markdown("**Assumptions**"); st.write(result.get("assumptions",[]))
             with mtabs[4]:
-                for path, content in st.session_state.artifacts.items():
+                for path, content in artifact_state.items():
+                    if not isinstance(path, str) or not isinstance(content, str):
+                        continue
                     with st.expander(path):
                         st.code(content[:20000], language="xml" if path.endswith(".xaml") else "python" if path.endswith(".py") else "json" if path.endswith(".json") else "markdown")
             zip_buffer=io.BytesIO()
             with zipfile.ZipFile(zip_buffer,"w",zipfile.ZIP_DEFLATED) as z:
-                for path, content in st.session_state.artifacts.items(): z.writestr(path,content)
-                z.writestr("README_FIRST.md", "Review migration-report.md first. Generated target files may be scaffolds and are not guaranteed import-ready. Build and test in the exact target product/version before deployment.\n")
+                for path, content in artifact_state.items():
+                    if isinstance(path, str) and isinstance(content, str): z.writestr(path,content)
+                z.writestr("README_FIRST.md", "Review migration-report.md first. For the SYNC workbook, the XAML package contains deterministic offline business rules in modular workflows. Open project.json in UiPath Studio, restore packages, validate and build. SAP GUI selectors must be captured in the approved SAP environment before live SAP pulling can run. Regression-test on a copy of the workbook before enabling write-back.\n")
             st.download_button("Download migration package (.zip)", data=zip_buffer.getvalue(), file_name="automation_migration_package.zip", mime="application/zip", type="primary", use_container_width=True)
             json_buf=json.dumps(result,indent=2,ensure_ascii=False).encode("utf-8")
             st.download_button("Download migration result (.json)", data=json_buf, file_name="migration_result.json", mime="application/json")
 
 elif page == "Skill Library":
     st.subheader("Skill library")
-    st.write("Import Agent Skills-compatible packs from GitHub or a ZIP file. The workbench indexes SKILL.md and Markdown references; imported scripts are not executed.")
+    st.write("The workbench bundles local platform playbooks and can import every Markdown file from the linked upstream repositories. Imported scripts and binaries are never executed.")
     st.markdown("#### Supplied skill sources")
     st.dataframe(pd.DataFrame(DEFAULT_SOURCES), use_container_width=True, hide_index=True)
+    st.info(f"{len(st.session_state.skills)} Markdown skill/reference files are currently loaded, including bundled offline playbooks. No model API key is needed to use them.")
+    st.caption("GitHub topic pages are discovery indexes, not a single skill repository. Select/import individual Python or agentic skill repositories from those indexes. The importer stores Markdown only and does not execute imported scripts.")
+    if st.button("Fetch all Markdown skills from supplied GitHub repositories (no API key)"):
+        repo_sources = [
+            ("UiPath RPA", "https://github.com/UiPath/skills/tree/main/skills"),
+            ("Microsoft Power Automate", "https://github.com/microsoft/power-platform-skills/tree/main/plugins/power-automate"),
+            ("VBA", "https://github.com/RenRMT/claude-code-vba-skills"),
+            ("Agent Skills specification", "https://github.com/agentskills/agentskills"),
+        ]
+        added=0; errors=[]
+        progress=st.progress(0.0, text="Starting skill repository imports…")
+        for i,(label,url) in enumerate(repo_sources, start=1):
+            try:
+                imported=import_github_skill_repo(url, max_files=1200, max_bytes=45_000_000)
+                st.session_state.skills=merge_skills(st.session_state.skills, imported)
+                added += len(imported)
+                progress.progress(i/len(repo_sources), text=f"Imported {label}: {len(imported)} Markdown files")
+            except Exception as exc:
+                errors.append(f"{label}: {type(exc).__name__}: {exc}")
+                progress.progress(i/len(repo_sources), text=f"Could not import {label}")
+        if added: st.success(f"Imported {added} Markdown skill/reference files without an API key.")
+        for err in errors: st.warning(err)
+        if not added and errors: st.info("Bundled local skills remain available. Retry the import later if GitHub rate limits or network access prevented downloads.")
     st.markdown("#### Import a GitHub skill repository")
     repo_url=st.text_input("Public GitHub repository or /tree/branch/path URL", placeholder="https://github.com/owner/repo")
     gh_token=st.text_input("Optional GitHub token (private repo / higher API limits)", type="password")
@@ -202,7 +279,7 @@ elif page == "Skill Library":
         try:
             with st.spinner("Reading skill manifests and Markdown references…"):
                 imported=import_github_skill_repo(repo_url,gh_token)
-            st.session_state.skills.extend(imported)
+            st.session_state.skills=merge_skills(st.session_state.skills, imported)
             st.success(f"Imported {len(imported)} skill/reference document(s).")
         except Exception as exc: st.error(str(exc))
     st.markdown("#### Import skill files")
@@ -213,7 +290,7 @@ elif page == "Skill Library":
         try:
             if skill_zip: imported.extend(import_skill_zip(skill_zip.getvalue(), skill_zip.name))
             for f in skill_md or []: imported.append(parse_skill_markdown(f.getvalue().decode("utf-8","replace"), f.name))
-            st.session_state.skills.extend(imported)
+            st.session_state.skills=merge_skills(st.session_state.skills, imported)
             st.success(f"Added {len(imported)} skill/reference document(s).")
         except Exception as exc: st.error(str(exc))
     st.markdown("#### Imported library")
@@ -222,8 +299,16 @@ elif page == "Skill Library":
         names=[f"{x.get('name')} — {x.get('source')}" for x in st.session_state.skills]
         selected=st.selectbox("Preview reference",names)
         st.markdown(st.session_state.skills[names.index(selected)].get("content","")[:12000])
-        if st.button("Clear imported skills"): st.session_state.skills=[]; st.rerun()
-    else: st.info("No skill packs imported. The supplied URLs are catalogued above but not assumed to be fully downloaded.")
+        if st.button("Clear imported skills"): st.session_state.skills=load_bundled_skills(); st.rerun()
+        skill_zip_buffer=io.BytesIO()
+        with zipfile.ZipFile(skill_zip_buffer, "w", zipfile.ZIP_DEFLATED) as skill_archive:
+            for index, skill in enumerate(st.session_state.skills):
+                safe_name=re.sub(r"[^A-Za-z0-9_.-]+", "_", str(skill.get("name") or f"skill_{index}"))
+                source_name=str(skill.get("source") or "bundled")
+                source_slug=re.sub(r"[^A-Za-z0-9_.-]+", "_", source_name)[:100]
+                skill_archive.writestr(f"{safe_name}/{source_slug}.md", str(skill.get("content", "")))
+        st.download_button("Download all loaded skill Markdown (.zip)", data=skill_zip_buffer.getvalue(), file_name="Universal_Migration_Skill_Library.zip", mime="application/zip")
+    else: st.info("No skills loaded. The bundled skillpacks directory should supply the offline playbooks.")
     st.warning("A GitHub 'topic' page such as python-skills is a discovery directory, not one canonical skill pack. Select and import specific repositories from it. Check each repository's license and quality before using it in production.")
 
 else:
@@ -232,15 +317,15 @@ else:
 ### What this workbench does
 - Parses common source types into evidence: files, symbols, XAML activities, JSON actions, conditional/loop/error indicators and likely external system touchpoints.
 - Builds a platform-neutral workflow representation before target generation.
-- Loads Agent Skills-style `SKILL.md` material from public GitHub repositories or ZIPs. Markdown references can inform migration prompts; imported scripts are never run.
-- Generates a migration report, source-to-target mapping, unresolved-item list, test plan and target starter artifacts.
+- Bundles offline `.md` playbooks for UiPath, Power Automate, VBA, Python, Automation Anywhere, Blue Prism and Agent Skills. The Skill Library can fetch all Markdown files under the specified public repository paths without an AI key; fetched documents stay in the current Streamlit session until downloaded/exported. Imported scripts are never run.
+- Generates a migration report, source-to-target mapping, unresolved-item list, test plan and target-specific packages. For the SYNC workbook, the offline translator emits one Main XAML plus reusable business-capability workflows. Native Workbook Read/Write and Invoke Workflow activities orchestrate each stage; dense DataTable rules are in bounded VB.NET Invoke Code blocks. It does not create one XAML for every tiny VBA helper.
 - Uses an opt-in OpenAI-compatible model call for deeper semantic interpretation and generation.
 
 ### What it does not promise
 - There is no universal one-click compiler from every language/RPA product to every other platform. Proprietary packages, selectors, credentials, connector schemas, versioned activity packages and tenant resources require target-specific information.
-- A `.xlsm` workbook can contain formulas, named ranges, forms, buttons, ActiveX controls, external links, workbook events and macro code. This first version extracts VBA modules (requires `oletools`) and basic workbook metadata; it does not emulate Excel or execute a macro.
+- A `.xlsm` workbook can contain formulas, named ranges, forms, buttons, ActiveX controls, external links, workbook events and macro code. This version uses a bundled pure-Python VBA project extractor and openpyxl metadata reader; no `oletools` or model API key is required for supported workbooks. It does not emulate Excel or execute a macro.
 - Automation Anywhere `.atmx`, Blue Prism `.bprelease`, proprietary UiPath package/project archives and some Power Automate exports may require version-specific parsers. Unknown files are treated as source evidence, not fabricated as native projects.
-- A generated XAML or flow design must be opened, validated, built and tested in the actual target product/version before deployment.
+- Static XAML/XML validation is not a UiPath compile. A generated project must be opened, packages restored, validated, built and regression-tested in the actual target product/version before deployment.
 
 ### Recommended migration quality gates
 1. Source inventory and dependency discovery.
@@ -257,4 +342,4 @@ Agent Skills are directory-based packages with a required `SKILL.md` and optiona
 """)
 
 st.divider()
-st.caption("Prototype migration environment · Local-first static analysis · Optional model-assisted generation · Human validation required")
+st.caption("Local-first migration environment · Offline deterministic SYNC-to-UiPath conversion · Optional model-assisted semantic review · Studio validation required")

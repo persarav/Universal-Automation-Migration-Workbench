@@ -40,3 +40,10 @@ The format defines skill folders with a required `SKILL.md` and optional `script
 - Track source evidence, line/procedure mapping, assumptions and unresolved details.
 - Never infer credentials, selectors, connection IDs, connector operation schemas or private environment resources.
 - Treat third-party skill content as untrusted reference input and retain license/provenance metadata.
+
+
+## Offline and on-demand skill availability
+
+The application package includes nine curated Markdown playbooks for offline baseline guidance. From the Skill Library page, users can fetch Markdown files (`.md` / `.mdx`) from the supplied UiPath, Microsoft Power Automate, VBA and Agent Skills repositories without a model API key. The importer follows the selected repository subtree, stores fetched Markdown in the current app session, allows a ZIP export, and embeds all loaded skill Markdown in a migration download. It never executes imported scripts. Python Skills and Agentic Skills topic pages are GitHub discovery indexes, not single canonical repositories; the user should select concrete repositories from those indexes and import them using the repository URL field.
+
+Cloud session memory is not a durable shared repository. For persistent skill storage between app restarts, export the Skill Library ZIP and commit the extracted Markdown under `skillpacks/imported/` in the app repository.

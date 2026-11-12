@@ -18,6 +18,11 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from vba_extractor import extract_vba_modules as _extract_vba_modules
+except Exception:  # pragma: no cover - optional import fallback
+    _extract_vba_modules = None
+
 SUPPORTED_EXTENSIONS = {
     ".xlsm", ".xlam", ".bas", ".cls", ".frm", ".vba", ".txt",
     ".py", ".pyw", ".vb", ".vbs", ".cs", ".xaml", ".json",
@@ -42,6 +47,7 @@ class Symbol:
     calls: list[str] | None = None
     source_file: str = ""
     body_excerpt: str = ""
+    body_source: str = ""
 
 
 def _decode(data: bytes) -> str:
@@ -91,9 +97,10 @@ def detect_language(filename: str, text: str = "") -> str:
 
 
 def _extract_vba_from_xlsm(raw: bytes, filename: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """Extract VBA with oletools when installed; inspect workbook metadata with openpyxl.
+    """Read workbook metadata and extract VBA source without executing macros.
 
-    Returns extracted code files and workbook metadata messages. No macros are executed.
+    The bundled pure-Python MS-OVBA extractor is preferred, so Streamlit Cloud
+    does not depend on oletools being installed. oletools remains a fallback.
     """
     modules: list[dict[str, Any]] = []
     notes: list[str] = []
@@ -104,12 +111,29 @@ def _extract_vba_from_xlsm(raw: bytes, filename: str) -> tuple[list[dict[str, An
         for ws in wb.worksheets:
             notes.append(f"Sheet '{ws.title}': {ws.max_row} rows × {ws.max_column} columns")
             if ws.max_row:
-                headers = [normalize_text(str(c.value)) for c in next(ws.iter_rows(min_row=1, max_row=1)) if c.value is not None]
+                first = next(ws.iter_rows(min_row=1, max_row=1))
+                headers = [normalize_text(str(c.value)) for c in first if c.value is not None]
                 if headers:
-                    notes.append(f"Sheet '{ws.title}' first-row headers: " + " | ".join(headers[:30]))
+                    notes.append(f"Sheet '{ws.title}' first-row headers: " + " | ".join(headers[:40]))
         wb.close()
     except Exception as exc:
         notes.append(f"Workbook metadata could not be read: {type(exc).__name__}: {exc}")
+
+    if _extract_vba_modules is not None:
+        try:
+            extracted, extractor_notes = _extract_vba_modules(raw)
+            for item in extracted:
+                modules.append({
+                    "filename": item.get("filename") or f"{Path(filename).stem}_module.bas",
+                    "text": item.get("text", ""),
+                    "language": "VBA module",
+                })
+            notes.extend(extractor_notes or [])
+            if modules:
+                notes.append("VBA source extracted by the bundled offline parser; no macros were executed.")
+                return modules, notes
+        except Exception as exc:
+            notes.append(f"Bundled VBA extraction failed safely: {type(exc).__name__}: {exc}")
 
     try:
         from oletools.olevba import VBA_Parser
@@ -118,16 +142,15 @@ def _extract_vba_from_xlsm(raw: bytes, filename: str) -> tuple[list[dict[str, An
             for _, stream_path, vba_filename, code in parser.extract_macros():
                 if isinstance(code, bytes):
                     code = _decode(code)
-                modules.append({"filename": vba_filename or stream_path or "module.bas", "text": str(code)})
+                modules.append({"filename": vba_filename or stream_path or "module.bas", "text": str(code), "language": "VBA module"})
         else:
             notes.append("No VBA project/macros detected by oletools.")
         parser.close()
     except ImportError:
-        notes.append("VBA extraction requires oletools. Install requirements.txt, then upload the XLSM again. Workbook sheet metadata was still inspected.")
+        notes.append("The bundled extractor could not read this VBA project and oletools is not installed. Workbook metadata was still inspected.")
     except Exception as exc:
         notes.append(f"VBA extraction failed safely: {type(exc).__name__}: {exc}")
     return modules, notes
-
 
 def extract_upload(filename: str, raw: bytes) -> dict[str, Any]:
     """Extract source text from a single supported file or a zip archive."""
@@ -193,7 +216,8 @@ def _python_symbols(source: str, filename: str) -> list[Symbol]:
                 params = [a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
             end = getattr(node, "end_lineno", node.lineno)
             excerpt = "\n".join(lines[node.lineno-1:min(end, node.lineno+18)])
-            symbols.append(Symbol(node.name, kind, f"{kind} {node.name}({', '.join(params)})", node.lineno, end, params, [], filename, excerpt[:1600]))
+            body = "\n".join(lines[node.lineno-1:end])
+            symbols.append(Symbol(node.name, kind, f"{kind} {node.name}({', '.join(params)})", node.lineno, end, params, [], filename, excerpt[:6000], body))
     symbols.sort(key=lambda x: x.line)
     return symbols
 
@@ -202,35 +226,108 @@ VB_PROC = VBA_PROC
 CS_PROC = re.compile(r"^\s*(?:(?:public|private|protected|internal|static|async|virtual|override|sealed|\w+)\s+)+([\w<>\[\],.?]+)\s+([A-Za-z_]\w*)\s*\(([^\n;{}]*)\)\s*(?:\{|=>)", re.M)
 
 
+def _vba_procedure_blocks(source: str, filename: str) -> list[Symbol]:
+    """Extract complete VBA/VB procedure blocks using End Sub/Function/Property.
+
+    Handles attributes, access modifiers, wrapped declaration lines and complete
+    source bodies. This is more useful for traceability than an arbitrary 25-line
+    excerpt and avoids extending a procedure to the next declaration.
+    """
+    lines = source.splitlines()
+    starts = re.compile(
+        r"^\s*(?:(?:Public|Private|Friend|Static|Default|Global)\s+)*(Sub|Function|Property\s+(?:Get|Let|Set))\s+([A-Za-z_][\w]*)\b",
+        re.I,
+    )
+    end_patterns = {
+        "sub": re.compile(r"^\s*End\s+Sub\s*(?:'.*)?$", re.I),
+        "function": re.compile(r"^\s*End\s+Function\s*(?:'.*)?$", re.I),
+        "property": re.compile(r"^\s*End\s+Property\s*(?:'.*)?$", re.I),
+    }
+    symbols: list[Symbol] = []
+    i = 0
+    while i < len(lines):
+        m = starts.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        decl_start = i
+        kind_text = m.group(1).lower()
+        kind = "property" if kind_text.startswith("property") else kind_text
+        name = m.group(2)
+        # Join line-continuation declaration text, but stop before the first body line.
+        decl_end = i
+        while decl_end + 1 < len(lines) and lines[decl_end].rstrip().endswith("_"):
+            decl_end += 1
+        signature = " ".join(x.strip().rstrip("_").strip() for x in lines[decl_start:decl_end + 1])
+        end_idx = decl_end
+        end_re = end_patterns[kind]
+        for j in range(decl_end + 1, len(lines)):
+            if end_re.match(lines[j]):
+                end_idx = j
+                break
+        body_source = "\n".join(lines[decl_start:end_idx + 1])
+        # Extract a readable parameter list from the full declaration.
+        paren = re.search(r"\((.*)\)", signature)
+        params = []
+        if paren:
+            params = [normalize_text(x) for x in paren.group(1).split(",") if normalize_text(x)]
+        symbols.append(Symbol(
+            name=name,
+            kind=kind,
+            signature=normalize_text(signature),
+            line=decl_start + 1,
+            end_line=end_idx + 1,
+            parameters=params,
+            calls=[],
+            source_file=filename,
+            body_excerpt=body_source[:6000],
+            body_source=body_source,
+        ))
+        i = max(end_idx + 1, decl_end + 1)
+    return symbols
+
+
 def _generic_symbols(source: str, filename: str, language: str) -> list[Symbol]:
     lines = source.splitlines()
     symbols: list[Symbol] = []
     if "VBA" in language or "VB.NET" in language or "VBScript" in language:
-        matches = list(VBA_PROC.finditer(source))
-        for i, m in enumerate(matches):
-            start = source.count("\n", 0, m.start()) + 1
-            end = source.count("\n", 0, matches[i+1].start()) if i+1 < len(matches) else len(lines)
-            sig = normalize_text(m.group(0))
-            params = [normalize_text(p) for p in (m.group(3) or "()")[1:-1].split(",") if p.strip()]
-            excerpt = "\n".join(lines[start-1:min(end, start+25)])
-            symbols.append(Symbol(m.group(2), m.group(1).lower(), sig, start, end, params, [], filename, excerpt[:1800]))
+        symbols = _vba_procedure_blocks(source, filename)
     elif language == "C#":
         for m in CS_PROC.finditer(source):
             start = source.count("\n", 0, m.start()) + 1
-            symbols.append(Symbol(m.group(2), "method", normalize_text(m.group(0)), start, start, [normalize_text(x) for x in m.group(3).split(",") if x.strip()], [], filename, "\n".join(lines[start-1:start+18])[:1500]))
+            # Best-effort brace matching for complete C# method body.
+            open_brace = source.find("{", m.start())
+            end_pos = open_brace
+            depth = 0
+            if open_brace >= 0:
+                for pos in range(open_brace, len(source)):
+                    if source[pos] == "{": depth += 1
+                    elif source[pos] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end_pos = pos + 1
+                            break
+            else:
+                end_pos = m.end()
+            body = source[m.start():end_pos]
+            end = source.count("\n", 0, end_pos) + 1
+            symbols.append(Symbol(m.group(2), "method", normalize_text(m.group(0)), start, end,
+                                  [normalize_text(x) for x in m.group(3).split(",") if x.strip()], [], filename,
+                                  body[:6000], body))
     else:
         # Best-effort method/procedure discovery for scripts and exported automation text.
         for pat, kind in [(r"(?im)^\s*(?:Sub|Function)\s+([A-Za-z_]\w*)", "procedure"), (r"(?im)^\s*def\s+([A-Za-z_]\w*)", "function")]:
             for m in re.finditer(pat, source):
                 start = source.count("\n", 0, m.start()) + 1
-                symbols.append(Symbol(m.group(1), kind, normalize_text(m.group(0)), start, start, [], [], filename, "\n".join(lines[start-1:start+15])[:1200]))
-    # Add approximate call references only for identifiers that match discovered symbols.
+                end = start
+                body = "\n".join(lines[start-1:min(len(lines), start+80)])
+                symbols.append(Symbol(m.group(1), kind, normalize_text(m.group(0)), start, end, [], [], filename, body[:6000], body))
+    # Calls are detected against complete bodies, and kept as dependency hints only.
     names = {s.name.lower() for s in symbols}
-    for s in symbols:
-        body = s.body_excerpt.lower()
-        s.calls = sorted({n for n in names if n != s.name.lower() and re.search(rf"\b{re.escape(n)}\s*\(", body)})
+    for symbol in symbols:
+        body = (symbol.body_source or symbol.body_excerpt).lower()
+        symbol.calls = sorted({n for n in names if n != symbol.name.lower() and re.search(rf"\b{re.escape(n)}\s*(?:\(|\b)", body)})
     return symbols
-
 
 def parse_xaml(source: str, filename: str) -> dict[str, Any]:
     result = {"activities": [], "variables": [], "arguments": [], "invokes": []}
@@ -476,8 +573,11 @@ def call_openai_compatible(prompt: str, source_files: list[dict[str, Any]], api_
     return result
 
 
-def generate_fallback(target: str, ir: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
-    """Produce honest, non-executable-by-default output when no LLM is configured."""
+def generate_fallback(target: str, ir: dict[str, Any], analysis: dict[str, Any], relevant_skills: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Generate a deterministic local migration package; no model API is required."""
+    if target == "UiPath (XAML)":
+        from uipath_generator import generate_uipath_project
+        return generate_uipath_project(analysis, ir, relevant_skills or [])
     names = [s.get("name") for s in analysis.get("symbols", [])]
     steps = ir.get("workflow", {}).get("steps", [])
     lines = [f"# Migration design: {ir.get('project')}", "", f"Target: {target}", "", "> This is a deterministic scaffold based on static source parsing. It is not a complete semantic conversion or a deployable RPA package.", "", "## Discovered source procedures"]
@@ -513,7 +613,61 @@ def generate_fallback(target: str, ir: dict[str, Any], analysis: dict[str, Any])
     }
 
 
+def normalize_migration_result(result: Any, target: str, analysis: dict[str, Any]) -> dict[str, Any]:
+    """Normalize any analyzer/model return into the stable shape expected by Streamlit.
+
+    This is the UI boundary: malformed model output, a None return or a non-dict
+    value must never cause the rendering phase to raise AttributeError.
+    """
+    if not isinstance(result, dict):
+        result = {}
+    analysis = analysis if isinstance(analysis, dict) else {}
+    symbols = analysis.get("symbols", [])
+    if not isinstance(symbols, list): symbols = []
+    normalized = dict(result)
+    normalized.setdefault("executive_summary", f"Migration draft for {target}")
+    if not isinstance(normalized.get("source_logic"), dict):
+        normalized["source_logic"] = {"detected_procedures": [s.get("name", "") for s in symbols if isinstance(s, dict)]}
+    if not isinstance(normalized.get("target_design"), dict):
+        normalized["target_design"] = {"target": target, "status": "review required"}
+    else:
+        normalized["target_design"] = dict(normalized["target_design"])
+        normalized["target_design"].setdefault("target", target)
+        normalized["target_design"].setdefault("status", "review required")
+    normalized.setdefault("generated_files", [])
+    normalized.setdefault("mapping_table", [])
+    normalized.setdefault("unresolved_items", [])
+    normalized.setdefault("test_plan", [])
+    normalized.setdefault("risks", [])
+    normalized.setdefault("assumptions", [])
+    normalized.setdefault("confidence", "low")
+    for key in ("generated_files", "mapping_table", "unresolved_items", "test_plan", "risks", "assumptions"):
+        value = normalized.get(key)
+        if not isinstance(value, list): normalized[key] = []
+    clean_files = []
+    for raw_item in normalized["generated_files"]:
+        if not isinstance(raw_item, dict) or not isinstance(raw_item.get("path"), str):
+            continue
+        item = dict(raw_item)
+        content = item.get("content", "")
+        if content is None:
+            content = ""
+        elif not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, indent=2) if isinstance(content, (dict, list)) else str(content)
+        item["content"] = content
+        item["purpose"] = str(item.get("purpose") or "Generated artifact; review before use.")
+        clean_files.append(item)
+    normalized["generated_files"] = clean_files
+    normalized["mapping_table"] = [dict(x) for x in normalized["mapping_table"] if isinstance(x, dict)]
+    for key in ("unresolved_items", "test_plan", "risks", "assumptions"):
+        normalized[key] = [x for x in normalized[key] if x is not None]
+    for key in ("executive_summary", "confidence"):
+        if not isinstance(normalized.get(key), str): normalized[key] = str(normalized.get(key) or "")
+    return normalized
+
+
 def build_report_md(result: dict[str, Any], analysis: dict[str, Any], target: str) -> str:
+    result = normalize_migration_result(result, target, analysis)
     out = ["# Automation migration report", "", f"**Source:** {analysis.get('source_filename')}", f"**Target:** {target}", f"**Confidence:** {result.get('confidence', 'not rated')}", "", "## Summary", str(result.get("executive_summary", "")), "", "## Source understanding"]
     sl = result.get("source_logic", {})
     out.append("```json\n" + json.dumps(sl, indent=2, ensure_ascii=False)[:30000] + "\n```")

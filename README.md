@@ -10,7 +10,8 @@ A local-first web application prototype for understanding source code/RPA workfl
 - Parse basic UiPath XAML activities and JSON-based flow definitions.
 - Build a platform-neutral intermediate representation (IR) before target generation.
 - Import Agent Skills-style skill packs from a GitHub repository or ZIP. Indexes `SKILL.md` and Markdown reference docs only; imported scripts are not executed.
-- Generate a migration report, traceability table, unresolved-items list, regression test plan and target scaffold.
+- Generate a migration report, traceability table, unresolved-items list and regression test plan.
+- For the supplied SYNC VBA workbook, generate a deterministic UiPath Windows project with a Main orchestrator and 19 child/integration workflows; all 249 detected procedures are mapped to a logical workflow. The business-rule workflows contain the reconstructed DataTable logic, not placeholder TODO activities.
 - Optional AI-assisted semantic conversion through an OpenAI-compatible Chat Completions API. Source transfer is disabled unless the user explicitly checks the consent box.
 
 ## Run on Windows
@@ -47,7 +48,7 @@ docker run --rm -p 8501:8501 migration-workbench
 
 ## Skills
 
-The Skill Library page catalogues the supplied repositories and allows importing skill packages from GitHub or ZIP. It fetches `SKILL.md` and Markdown references only. It deliberately does not execute third-party code or fetch arbitrary executable assets into the prompt.
+The Skill Library page includes nine curated offline Markdown playbooks covering UiPath, Power Automate, Automation Anywhere, Blue Prism, VBA, Python and Agent Skills, and can fetch up to 1,200 Markdown files / 45 MB from the supplied GitHub repositories without a model API key. It fetches `.md`/`.mdx` files and does not execute third-party scripts. Imported skills stay in the active Streamlit session and can be downloaded as a ZIP or embedded into the migration package. For durable cloud persistence, commit the downloaded Markdown library into `skillpacks/imported/` in the GitHub repository.
 
 The Python topic URL is a GitHub discovery page, not a single skill repository. Choose specific repositories from that topic before importing. Check the upstream license, version and maturity before adopting a skill pack.
 
@@ -55,10 +56,10 @@ The Python topic URL is a GitHub discovery page, not a single skill repository. 
 
 This is a migration workbench prototype, not a universal compiler. Direct code-to-code or RPA-to-RPA conversion cannot be guaranteed for all products. A valid target migration often requires tenant metadata, connector operation schemas, activity package versions, selectors, credentials, queues, assets, machine configuration, proprietary export formats and business-owner decisions.
 
-- The deterministic mode provides static facts and clearly labeled scaffolds. It does not infer complete business semantics.
-- The LLM mode can infer and generate more, but generated output still requires human review and native target validation.
+- The SYNC-specific offline translator implements the reviewed workbook business rules without a model API key. This is a source-specific migration, not a universal semantic compiler.
+- For unrelated or unsupported source projects, offline mode provides static analysis and a target design/scaffold; it does not claim a complete semantic conversion. An optional model can assist with semantic inference, but generated output still requires human review and native target validation.
 - The workbench is designed for local use or deployment behind an organization-approved authentication gateway. Do not expose an unauthenticated Streamlit instance publicly.
-- UiPath output from fallback mode is a starter XAML with TODO placeholders, not a compiled workflow.
+- The SYNC-specific UiPath route creates 20 XAML files: Main, cohesive business workflows and SAP integration boundaries. The 249 procedures are consolidated into logical workflows, rather than creating one fragile XAML file per tiny helper. Dense deterministic DataTable transformations are implemented in bounded VB Invoke Code blocks; workbook I/O and orchestration use native UiPath activities. The project still needs UiPath Studio Validate/Build and regression testing before production.
 - Power Automate, Automation Anywhere and Blue Prism fallback output is a design blueprint, not an import-ready package.
 - Excel VBA extraction uses `oletools`; the app never runs VBA macros.
 - The current workbook parser extracts macro code and basic sheet/header metadata, but does not fully emulate workbook buttons, forms, ActiveX, formulas, events or external connections.
