@@ -1,0 +1,19 @@
+[
+  "tests/test_engine.py::test_agent_skill_frontmatter",
+  "tests/test_engine.py::test_blue_prism_fallback_is_explicit_blueprint",
+  "tests/test_engine.py::test_bundled_skills_are_loaded_offline",
+  "tests/test_engine.py::test_github_tree_subpath",
+  "tests/test_engine.py::test_ir_and_fallback_are_traceable",
+  "tests/test_engine.py::test_migration_result_normalizer_is_safe_for_invalid_generator_output",
+  "tests/test_engine.py::test_migration_result_normalizer_sanitizes_generated_file_payloads",
+  "tests/test_engine.py::test_power_automate_json_parse",
+  "tests/test_engine.py::test_python_ast_inventory",
+  "tests/test_engine.py::test_secret_scrubbing_before_model_transfer",
+  "tests/test_engine.py::test_sync_procedure_classification_keeps_helpers_with_owner_workflow",
+  "tests/test_engine.py::test_sync_uipath_generator_emits_studio_24108_type_and_activity_namespaces",
+  "tests/test_engine.py::test_uipath_generator_maps_sync_source_to_modular_project",
+  "tests/test_engine.py::test_uipath_invoke_code_arguments_bind_to_variable_names",
+  "tests/test_engine.py::test_uipath_xaml_fallback_is_well_formed_xml",
+  "tests/test_engine.py::test_vba_procedure_detection",
+  "tests/test_engine.py::test_xaml_activity_parse"
+]

@@ -1,27 +1,52 @@
-# Local validation record
+---
+name: uipath-rpa-migration
+description: Analyze, design, generate and validate UiPath Windows XAML projects and workflows for migration from code or other RPA platforms.
+---
+# UiPath RPA migration skill
 
-Validation performed in the build environment on 2026-11-12.
+## Project-first rules
+1. Detect project target framework and project style before generating anything. New or ambiguous projects default to Modern Windows XAML unless the user explicitly requests coded C# or Legacy.
+2. Preserve the existing `expressionLanguage` and `targetFramework` when editing a project. Do not silently convert Legacy and Windows projects.
+3. Inspect `project.json`, package dependencies, existing workflow conventions and activity availability before authoring XAML.
+4. Use a small number of cohesive workflows. Main.xaml orchestrates business phases; child XAML files implement reusable business operations.
+5. Prefer native activities for Excel/file/system interactions. Use a small `Invoke Code` or coded workflow for dense table aggregation, scoring and complex transformations rather than deeply nested XAML loops.
+6. Use `Invoke Workflow File` with explicit typed arguments for reusable workflows. Avoid global mutable state.
 
-## Passed
+## XAML authoring rules
+- Use UiPath Studio-compatible XAML and the correct activity package namespaces.
+- Every workflow must have a valid root Activity and appropriate `x:Class` / `x:Members` declarations.
+- Give every activity a unique, stable `sap2010:WorkflowViewState.IdRef`.
+- Wrap bodies of Sequence, If, ForEach and TryCatch branches in proper Sequence/container nodes as required by the activity schema.
+- Use meaningful DisplayName values that describe the action and business purpose.
+- Use VB expressions in the correct expression syntax and XML-escape attribute content.
+- Define arguments with explicit direction and type. Keep input/output contracts small and documented.
+- Do not invent selectors, UI element IDs, connection IDs, tenant IDs or credential names. Mark these as capture/configuration requirements.
 
-- `python -m py_compile app.py engine.py uipath_generator.py skill_loader.py build_sync_project.py validate_uipath_project.py` — passed.
-- `pytest -q` — **16 tests passed**.
-- Actual `SYNC_password_removed.xlsm` source extraction — 19 VBA source files, including `ThisWorkbook` event code.
-- Source inventory — **249 Sub/Function procedures detected** and **249 mapping rows generated**.
-- UiPath generator — **20 XAML files** generated: one Main orchestrator, 17 cohesive business/utility workflows and 2 SAP adapter workflows.
-- Bundled offline skills — **9 Markdown playbooks** included in the app and standalone UiPath project.
-- XAML parsing — every generated XAML file parsed as well-formed XML.
-- Static UiPath project validator — passed: project manifest, workflow references, unique activity IDs, argument bindings, mapping targets and package references were checked.
-- No placeholder `TODO: implement` activities are emitted by the SYNC-specific generator.
-- Offline generation — `uses_model_api_key=false`.
-- Procedure mapping regression checks — snapshots, retired PO helpers, STF candidate logic, appointment parsing, SAP inventory extraction and dashboard-only actions map to the intended owning workflows.
-- Migration result normalization — `None`, non-dictionary values, malformed file content and malformed mapping rows are normalized before Streamlit rendering.
+## Excel migration
+- Prefer Workbook activities for direct workbook operations when Excel UI is not required; use `Read Range Workbook` and `Write Range Workbook` for DataTable-based files.
+- For macro-enabled `.xlsm`, preserve the original file unless the process explicitly changes it; never run macros during static analysis.
+- Read each required sheet/table once into DataTables, resolve headers by aliases, normalize keys, calculate in memory, and write only changed output columns/ranges.
+- Preserve formulas, formatting, hidden sheets and workbook features by writing only targeted cells/columns. Validate write ranges carefully.
 
-## Important limits (not verified in this environment)
+## SAP/UI automation
+- Prefer SAP GUI activities/official SAP integration where supported. If UI is required, capture selectors in the actual environment using Studio UI Explorer/Object Repository.
+- Never fabricate SAP selectors. Store transaction codes, field mappings and selector evidence separately from business-rule logic.
+- Add timeout, busy-state checks, status-bar handling, popup recovery and idempotent retry boundaries.
 
-- Streamlit is not installed in the build container, and outbound package-index access is unavailable, so the web server could not be launched here. The deployment runtime must install `requirements.txt`.
-- UiPath Studio is not installed here. Static XML validation is **not** equivalent to UiPath Studio Validate/Build; the project must be opened and built in the intended Studio version.
-- SAP GUI selectors for ME2M, ZPRR_INVSTAT and ME23N cannot be inferred safely from VBA. The generated SAP adapters intentionally fail closed until selectors are captured in the real SAP environment.
-- Outlook draft/send requires a configured, approved UiPath Outlook or Microsoft 365 activity and mailbox connection. The generated Email_Analysts workflow builds the recipient/CC/subject/body/attachment-row data but does not send mail.
-- The nine bundled Markdown files are curated offline playbooks. The Skill Library can fetch `.md`/`.mdx` files from the supplied GitHub repositories without an AI API key (subject to GitHub rate limits), then include them in the export. Python and Agentic Skills GitHub topic pages are discovery indexes, not canonical repositories.
-- For this SYNC workbook, deterministic business logic is generated offline. For arbitrary unrecognized source projects, the generic path remains an analysis/design scaffold until a source/target adapter is built or optional model assistance is enabled.
+## Error handling and reliability
+- Use Try Catch at meaningful transaction boundaries, not around every activity.
+- Validate inputs before destructive actions; fail closed on site/DC mismatches or missing deletion indicators.
+- Use logs with business keys and safe diagnostics. Never log passwords, tokens or sensitive workbook values unnecessarily.
+- Separate business-rule exceptions from system exceptions. Preserve source values unless the corresponding rule authorizes an update.
+- Make workflows restartable and record what was changed.
+
+## Validation gates
+1. Parse all XAML as XML.
+2. Confirm referenced child workflows exist and argument names/types match.
+3. Confirm every activity package is present in project.json.
+4. Open in the matching UiPath Studio version, resolve package metadata, validate and build.
+5. Run regression cases with source and target on the same fixtures and compare outputs and side effects.
+6. Capture SAP selectors and validate UI adapters separately.
+
+## Upstream reference
+https://github.com/UiPath/skills/tree/main/skills/uipath-rpa
