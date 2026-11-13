@@ -1,18 +1,26 @@
-# UiPath XAML best-practice checklist
+# Universal Automation Migration Workbench — Project Files
 
-- One orchestrator with clear phase boundaries; avoid a single monolithic Main.xaml.
-- One child workflow per cohesive business capability, not per tiny helper function.
-- Use in/out arguments for DataTables and run context, with explicit types and names.
-- Prefer native activities for file access, workbook reads/writes, logs and invoke-workflow orchestration.
-- Put complex deterministic transformations into a small, unit-testable Invoke Code block or coded workflow.
-- Keep business-rule VB code in a named workflow/region and document input/output contracts.
-- Use stable unique workflow/activity IDs and descriptive DisplayName values.
-- Use `Try Catch` around stages with meaningful recovery and rethrow behavior.
-- No fabricated selectors, credentials, package versions or connector IDs.
-- Parse XML, check referenced workflow paths, validate activity packages, then build in Studio.
-- Run baseline regression tests before production release.
+This package contains the Streamlit application source, deterministic analysis engine, UiPath XAML generator, skill loader, VBA extractor, bundled skill Markdown packs, tests, deployment configuration and documentation.
 
-This is a curated checklist, not a replacement for the current UiPath activity schema or official skill repository.
+## Main files
+- `app.py` — Streamlit interface and workflow orchestration.
+- `engine.py` — source parsing, normalized workflow model and deterministic analysis.
+- `uipath_generator.py` — UiPath project/XAML generation.
+- `vba_extractor.py` — VBA extraction from macro-enabled Excel files.
+- `skill_loader.py` — local/GitHub skill-pack loading.
+- `skillpacks/` — bundled platform skill Markdown files.
+- `tests/` — automated tests.
+- `requirements.txt` — Python package dependencies.
 
-- For `DateTime` arguments in Windows XAML workflows, use a CLR namespace alias such as `xmlns:sys="clr-namespace:System;assembly=System.Private.CoreLib"` and declare `InArgument(sys:DateTime)` / `OutArgument(sys:DateTime)`. Do not use `x:DateTime`.
-- Workbook `ReadRange` activities use the UiPath activity namespace `ui` (`xmlns:ui="http://schemas.uipath.com/workflow/activities"`), with the package reference supplied by `UiPath.Excel.Activities`; do not invent a separate `ue` prefix for the standard activity.
+## Run locally
+1. Install Python 3.10 or later.
+2. Create and activate a virtual environment.
+3. Install dependencies: `python -m pip install -r requirements.txt`.
+4. Start the app: `streamlit run app.py`.
+
+An AI API key is optional for the deterministic/offline analysis path. AI-assisted interpretation requires a configured model endpoint.
+
+## Streamlit Community Cloud
+Push the contents of this package to the root of a GitHub repository. In Streamlit Community Cloud, select that repository, branch `main`, and main file path `app.py`.
+
+- `tools/validate_uipath_project.py` — static preflight validator for generated UiPath Windows XAML projects (does not replace Studio Validate/Build).

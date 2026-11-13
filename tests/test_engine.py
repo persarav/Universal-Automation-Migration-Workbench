@@ -170,3 +170,32 @@ def test_uipath_invoke_code_arguments_bind_to_variable_names():
     assert 'x:Key="value"' in xaml
     assert 'x:Key="outUpdated"' in xaml
     assert '[out_updated]' in xaml
+
+
+def test_sync_uipath_generator_emits_studio_24108_type_and_activity_namespaces():
+    import json
+    import xml.etree.ElementTree as ET
+    from uipath_generator import generate_uipath_project
+    symbols = [
+        {"name":"Run_Full_Club_Check", "kind":"Sub", "source_file":"AutoClubCheck.bas", "line":1, "end_line":10, "signature":"Sub Run_Full_Club_Check()", "calls":[]},
+        {"name":"STO_Check", "kind":"Sub", "source_file":"Module3.bas", "line":1, "end_line":10, "signature":"Sub STO_Check()", "calls":[]},
+        {"name":"PO_Check", "kind":"Sub", "source_file":"Module6.bas", "line":1, "end_line":10, "signature":"Sub PO_Check()", "calls":[]},
+        {"name":"Storage_Release_Check", "kind":"Sub", "source_file":"StorageRelease.bas", "line":1, "end_line":10, "signature":"Sub Storage_Release_Check()", "calls":[]},
+    ]
+    output = generate_uipath_project({"symbols":symbols, "patterns":{}, "external_touchpoints":[]}, {}, [])
+    by_path = {f["path"]:f["content"] for f in output["generated_files"]}
+    project = json.loads(by_path["project.json"])
+    assert project["studioVersion"] == "24.10.8"
+    xamls = {k:v for k,v in by_path.items() if k.endswith(".xaml")}
+    assert len(xamls) == 20
+    for path, xml in xamls.items():
+        ET.fromstring(xml)
+        assert "x:DateTime" not in xml, path
+        assert "<ue:" not in xml and "xmlns:ue=" not in xml, path
+        if "sys:DateTime" in xml:
+            assert 'xmlns:sys="clr-namespace:System;assembly=System.Private.CoreLib"' in xml, path
+    main = xamls["Main.xaml"]
+    assert "<ui:ReadRange" in main
+    assert "<ui:WriteRange" in main
+    assert "xmlns:ui=\"http://schemas.uipath.com/workflow/activities\"" in main
+    assert "xmlns:sys=\"clr-namespace:System;assembly=System.Private.CoreLib\"" in main

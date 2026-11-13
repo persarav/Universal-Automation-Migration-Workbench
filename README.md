@@ -108,3 +108,9 @@ The upstream repositories are maintained by their respective owners and can chan
 ## Free cloud deployment
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the Streamlit Community Cloud deployment steps. For source-code privacy, use a private GitHub repository and keep the Streamlit app private. Do not commit API keys or customer source files.
+
+## UiPath XAML compatibility note
+
+The SYNC-specific offline generator targets UiPath Studio 24.10.8. It emits `sys:DateTime` using `System.Private.CoreLib` and uses the standard UiPath activity XML namespace (`ui`) for Workbook ReadRange/WriteRange activities. Run the project validation script and validate/build in the installed Studio version before production use.
+
+The bundled regression suite includes 24.10.8-specific checks for DateTime argument typing and Workbook activity namespaces. Run `pytest -q` and the included static validator before importing the generated project into UiPath Studio. This is a preflight and does not replace Studio Validate/Build.

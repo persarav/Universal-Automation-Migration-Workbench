@@ -13,3 +13,6 @@
 - Run baseline regression tests before production release.
 
 This is a curated checklist, not a replacement for the current UiPath activity schema or official skill repository.
+
+- For `DateTime` arguments in Windows XAML workflows, use a CLR namespace alias such as `xmlns:sys="clr-namespace:System;assembly=System.Private.CoreLib"` and declare `InArgument(sys:DateTime)` / `OutArgument(sys:DateTime)`. Do not use `x:DateTime`.
+- Workbook `ReadRange` activities use the UiPath activity namespace `ui` (`xmlns:ui="http://schemas.uipath.com/workflow/activities"`), with the package reference supplied by `UiPath.Excel.Activities`; do not invent a separate `ue` prefix for the standard activity.
